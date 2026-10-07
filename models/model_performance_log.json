@@ -1,0 +1,54 @@
+{
+    "Strategy_Base": {
+        "date_trained": "2026-10-07 18:45:36",
+        "metrics": {
+            "Accuracy": "44.6%",
+            "MAE": 0.886
+        },
+        "features_count": 137,
+        "removed_features": 0
+    },
+    "Strategy_Refined": {
+        "date_trained": "2026-10-07 18:45:36",
+        "metrics": {
+            "Accuracy": "43.9%",
+            "Win_Rate_Recall": "77.3%",
+            "MAE": 0.886
+        },
+        "features_count": 99,
+        "removed_features": 38
+    },
+    "Global_Gain_Base": {
+        "date_trained": "2026-10-07 18:56:20",
+        "metrics": {
+            "MAE": 15.58
+        },
+        "features_count": 137,
+        "removed_features": 0
+    },
+    "Global_Drop_Base": {
+        "date_trained": "2026-10-07 18:56:20",
+        "metrics": {
+            "MAE": 9.769
+        },
+        "features_count": 137,
+        "removed_features": 0
+    },
+    "Global_Gain_Refined": {
+        "date_trained": "2026-10-07 18:56:20",
+        "metrics": {
+            "MAE": 15.931,
+            "Directional_Accuracy": "48.8%"
+        },
+        "features_count": 89,
+        "removed_features": 48
+    },
+    "Global_Drop_Refined": {
+        "date_trained": "2026-10-07 18:56:20",
+        "metrics": {
+            "MAE": 9.915
+        },
+        "features_count": 89,
+        "removed_features": 48
+    }
+}
