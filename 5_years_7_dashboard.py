@@ -1,6 +1,7 @@
 from flask import Flask, render_template_string, jsonify, request
 import json
 import os
+import sys
 import threading
 import subprocess
 from datetime import datetime, timedelta
@@ -22,7 +23,7 @@ def run_notebook_pipeline(notebook_name, task_key):
     global TASK_STATUS
     TASK_STATUS[task_key] = "Running... ⏳"
     try:
-        subprocess.run(["jupyter", "nbconvert", "--execute", "--inplace", notebook_name], check=True)
+        subprocess.run([sys.executable, "-m", "nbconvert", "--execute", "--inplace", notebook_name], check=True)
         TASK_STATUS[task_key] = "Completed ✅"
     except Exception as e:
         TASK_STATUS[task_key] = f"Error ❌"
@@ -31,7 +32,7 @@ def run_data_job():
     global TASK_STATUS
     TASK_STATUS["data"] = "Running... ⏳ (Downloading & Processing)"
     try:
-        subprocess.run(["python3", "5_years_6.0_data_update_job.py"], check=True)
+        subprocess.run([sys.executable, "5_years_6.0_data_update_job.py"], check=True)
         TASK_STATUS["data"] = "Completed ✅"
     except Exception as e:
         TASK_STATUS["data"] = f"Error ❌"
@@ -41,7 +42,7 @@ def run_live_prediction(symbol):
     PREDICT_STATUS["status"] = "Running... ⏳ (Downloading live data & generating features)"
     PREDICT_STATUS["target"] = symbol
     try:
-        subprocess.run(["python3", "live_predictor_job.py", symbol], check=True)
+        subprocess.run([sys.executable, "live_predictor_job.py", symbol], check=True)
         PREDICT_STATUS["status"] = "Completed ✅"
     except Exception as e:
         PREDICT_STATUS["status"] = f"Error ❌"
@@ -133,7 +134,7 @@ HTML_TEMPLATE = """
                         </tr>
                     </thead>
                     <tbody class="bg-white divide-y divide-gray-200">
-                        {% for sym in ind_strat.keys() | list + ind_glob.keys() | list | unique %}
+                        {% for sym in symbols %}
                         <tr class="hover:bg-gray-50 model-row">
                             <td class="px-6 py-4 whitespace-nowrap font-bold text-indigo-600 symbol-cell">{{ sym }}</td>
                             <td class="px-6 py-4 whitespace-nowrap">{{ ind_strat.get(sym, {}).get('Accuracy', 'N/A') }}</td>
@@ -408,7 +409,8 @@ def dashboard():
             try: ind_glob_data = json.load(f)
             except: pass
             
-    return render_template_string(HTML_TEMPLATE, page='dashboard', models=log_data, ind_strat=ind_strat_data, ind_glob=ind_glob_data)
+    symbols = sorted(list(set(ind_strat_data.keys()) | set(ind_glob_data.keys())))
+    return render_template_string(HTML_TEMPLATE, page='dashboard', models=log_data, ind_strat=ind_strat_data, ind_glob=ind_glob_data, symbols=symbols)
 
 
 @app.route('/data')

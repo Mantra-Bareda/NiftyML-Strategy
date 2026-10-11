@@ -1,0 +1,27 @@
+{
+  "timestamp": "2026-10-11T20:51:57.806833",
+  "predictions": {
+    "RELIANCE": {
+      "date": "2026-10-09",
+      "close": 1170.3,
+      "strategy_triggered": false,
+      "predicted_r": 1.22,
+      "predicted_gain_pct": 29.05,
+      "predicted_drop_pct": 21.33,
+      "verdict": "BULLISH SETUP",
+      "verdict_class": "bullish",
+      "explanation": "Upward momentum expected (+29.05%). Awaiting entry pullback."
+    },
+    "TCS": {
+      "date": "2026-10-09",
+      "close": 2156.0,
+      "strategy_triggered": false,
+      "predicted_r": 1.21,
+      "predicted_gain_pct": 83.47,
+      "predicted_drop_pct": 129.88,
+      "verdict": "NEUTRAL / CONSOLIDATION",
+      "verdict_class": "neutral",
+      "explanation": "Rangebound action expected. No high-edge setup currently."
+    }
+  }
+}
