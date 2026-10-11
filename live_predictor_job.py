@@ -1,6 +1,7 @@
 import sys
 import json
 import os
+import time
 import warnings
 warnings.filterwarnings('ignore')
 import yfinance as yf
@@ -10,6 +11,7 @@ import joblib
 from datetime import datetime
 
 OUT_FILE = 'live_predictions.json'
+NIFTY_CACHE_FILE = 'nifty50_cache.pkl'
 
 def calc_rsi(series, period=14):
     delta = series.diff()
@@ -25,6 +27,28 @@ def calc_atr(df, period=14):
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
     true_range = np.max(ranges, axis=1)
     return true_range.rolling(period).mean()
+
+def get_nifty50_cached():
+    """Cache Nifty 50 data for 15 minutes to save bandwidth and speed up low-end laptops"""
+    now = time.time()
+    if os.path.exists(NIFTY_CACHE_FILE):
+        try:
+            mtime = os.path.getmtime(NIFTY_CACHE_FILE)
+            if (now - mtime) < 900: # 15 minutes
+                return pd.read_pickle(NIFTY_CACHE_FILE)
+        except Exception:
+            pass
+    try:
+        nifty = yf.download('^NSEI', period='200d', progress=False)
+        if isinstance(nifty.columns, pd.MultiIndex):
+            nifty.columns = nifty.columns.get_level_values(0)
+        nifty.to_pickle(NIFTY_CACHE_FILE)
+        return nifty
+    except Exception:
+        if os.path.exists(NIFTY_CACHE_FILE):
+            try: return pd.read_pickle(NIFTY_CACHE_FILE)
+            except Exception: pass
+        return None
 
 def calculate_stock_features(df, nifty_df=None):
     df = df.copy()
@@ -72,8 +96,8 @@ def calculate_stock_features(df, nifty_df=None):
         df[f'Dist_{w}D_High'] = (df['Close'] - df[f'{w}D_High']) / (df[f'{w}D_High'] + 1e-9) * 100
         df[f'Dist_{w}D_Low'] = (df['Close'] - df[f'{w}D_Low']) / (df[f'{w}D_Low'] + 1e-9) * 100
         
-    df['52W_High'] = df['High'].rolling(250).max()
-    df['52W_Low'] = df['Low'].rolling(250).min()
+    df['52W_High'] = df['High'].rolling(200).max()
+    df['52W_Low'] = df['Low'].rolling(200).min()
     df['Dist_52W_High'] = (df['Close'] - df['52W_High']) / (df['52W_High'] + 1e-9) * 100
     df['Dist_52W_Low'] = (df['Close'] - df['52W_Low']) / (df['52W_Low'] + 1e-9) * 100
     
@@ -199,7 +223,16 @@ COLUMN_MAPPING = {
 def run_predictor():
     raw_symbol = sys.argv[1].strip() if len(sys.argv) > 1 and sys.argv[1].strip() else 'RELIANCE'
     
-    # Load Models
+    # Load stock metadata (names and sectors)
+    stock_meta = {}
+    if os.path.exists('stock_names.json'):
+        try:
+            with open('stock_names.json') as f:
+                stock_meta = json.load(f)
+        except Exception:
+            pass
+
+    # Load Saved Models (Lightweight < 300KB each)
     try:
         strat_model = joblib.load('models/5_year_xgboost_model.pkl')
         strat_scaler = joblib.load('models/5_year_scaler.pkl')
@@ -222,14 +255,13 @@ def run_predictor():
         print(f"Warning: Global models not loaded: {e}")
         has_global = False
 
-    # Target symbols
+    # Determine symbols
     if raw_symbol.upper() == 'ALL':
         if os.path.exists('dataset_metadata.json'):
             with open('dataset_metadata.json') as f:
                 meta = json.load(f)
-            # Take top 30 key liquid stocks to keep it fast (<20s)
             all_syms = list(meta.get('symbols', {}).keys())
-            symbols = all_syms[:30] if len(all_syms) > 30 else all_syms
+            symbols = all_syms[:25] if len(all_syms) > 25 else all_syms
         else:
             symbols = ['RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK', 'SBIN', 'BHARTIARTL', 'TATAMOTORS']
     else:
@@ -238,15 +270,10 @@ def run_predictor():
 
     print(f"Fetching market data for {len(symbols)} symbol(s)...")
 
-    # Download Nifty 50 benchmark once
-    try:
-        nifty = yf.download('^NSEI', period='250d', progress=False)
-        if isinstance(nifty.columns, pd.MultiIndex):
-            nifty.columns = nifty.columns.get_level_values(0)
-    except Exception:
-        nifty = None
+    # Fast cached Nifty 50 retrieval
+    nifty = get_nifty50_cached()
 
-    # Load existing predictions to merge
+    # Load existing predictions to update/prepend
     predictions = {}
     if os.path.exists(OUT_FILE):
         try:
@@ -259,8 +286,8 @@ def run_predictor():
     for sym in symbols:
         try:
             yf_ticker = f"{sym}.NS"
-            df = yf.download(yf_ticker, period="250d", progress=False)
-            if df.empty or len(df) < 50:
+            df = yf.download(yf_ticker, period="200d", progress=False)
+            if df.empty or len(df) < 30:
                 print(f"Warning: Not enough data for {sym}")
                 continue
 
@@ -273,11 +300,10 @@ def run_predictor():
                 df['Adj Close'] = df['Close']
             df = df.reset_index()
 
-            # Calculate technical features
+            # Technical Feature Calculation
             df_feat = calculate_stock_features(df, nifty)
             df_feat.rename(columns=COLUMN_MAPPING, inplace=True)
 
-            # Lowercase remaining columns
             for col in df_feat.columns:
                 if col not in COLUMN_MAPPING.values() and col != 'Date':
                     df_feat.rename(columns={col: col.lower()}, inplace=True)
@@ -291,7 +317,7 @@ def run_predictor():
                 crossover_id = df_feat['ma_crossover'].cumsum()
                 df_feat['days_since_ma_crossover'] = df_feat.groupby(crossover_id).cumcount()
 
-            # Ensure all required columns exist
+            # Ensure expected features are aligned
             for col in strat_feats:
                 if col not in df_feat.columns:
                     df_feat[col] = np.nan
@@ -301,63 +327,148 @@ def run_predictor():
                         df_feat[col] = np.nan
 
             df_feat.replace([np.inf, -np.inf], np.nan, inplace=True)
-
             last_row = df_feat.iloc[[-1]].copy()
 
-            # Strategy prediction
+            # 1. Strategy Model Inference
             X_strat = last_row[strat_feats]
             X_strat_s = strat_scaler.transform(strat_imputer.transform(X_strat))
             pred_r = float(strat_model.predict(X_strat_s)[0])
-
             is_triggered = bool(last_row.get('base_signal', pd.Series([False])).iloc[0])
 
-            # Global prediction
+            # 2. Global Model Inference (points in ₹)
             if has_global:
                 X_glob = last_row[glob_feats]
                 X_glob_s = glob_scaler.transform(glob_imputer.transform(X_glob))
-                pred_gain = float(gain_model.predict(X_glob_s)[0])
-                pred_drop = float(drop_model.predict(X_glob_s)[0])
+                pred_gain_pts = max(0.5, float(gain_model.predict(X_glob_s)[0]))
+                pred_drop_pts = max(0.5, float(drop_model.predict(X_glob_s)[0]))
             else:
-                pred_gain, pred_drop = 0.0, 0.0
+                pred_gain_pts = 0.0
+                pred_drop_pts = 0.0
 
-            # Friendly recommendation logic
+            # Price data
             close_price = round(float(last_row['close'].iloc[0]), 2)
-            pred_gain_pct = round(pred_gain, 2)
-            pred_drop_pct = round(pred_drop, 2)
+            high_price = round(float(last_row['high'].iloc[0]), 2)
+            low_price = round(float(last_row['low'].iloc[0]), 2)
+            atr_val = round(float(last_row.get('atr14', pd.Series([close_price * 0.015])).iloc[0]), 2)
+            ma50_val = round(float(last_row.get('ma50', pd.Series([close_price])).iloc[0]), 2)
+            bb_lower_val = round(float(last_row.get('bb_lower', pd.Series([close_price * 0.98])).iloc[0]), 2)
+
+            # Percentage calculations
+            gain_pct = round((pred_gain_pts / close_price) * 100, 2)
+            drop_pct = round((pred_drop_pts / close_price) * 100, 2)
+
+            # =========================================================================
+            # INTEGRATED DUAL-MODEL TRADE PLAN SYNTHESIS
+            # =========================================================================
+            # Standard minimum risk buffer based on volatility
+            default_risk = max(pred_drop_pts, 1.5 * atr_val, close_price * 0.015)
 
             if is_triggered:
+                # Base strategy actively triggered today!
                 if pred_r >= 1.0:
-                    verdict = "BUY SIGNAL"
-                    verdict_class = "buy"
-                    explanation = f"Base 50MA setup triggered. High expected reward of {pred_r:.2f}R."
+                    verdict = "BUY (CONFIRMED BREAKOUT)"
+                    verdict_badge = "buy"
+                    buy_range_low = round(close_price, 2)
+                    buy_range_high = round(max(close_price * 1.004, high_price + 1.0), 2)
+                    entry_ref = round((buy_range_low + buy_range_high) / 2, 2)
+                    risk_amount = max(round(entry_ref - max(low_price - 1.0, entry_ref - (1.5 * atr_val)), 2), round(entry_ref * 0.015, 2))
+                    sl_price = round(entry_ref - risk_amount, 2)
+                    target_price = round(entry_ref + (2.0 * risk_amount), 2)
+                    explanation = f"50MA + Bollinger setup triggered today. AI confirms high win potential with {pred_r:.2f}R payoff multiple."
                 else:
-                    verdict = "SKIP SIGNAL"
-                    verdict_class = "skip"
-                    explanation = f"Base setup triggered but AI predicts lower payoff ({pred_r:.2f}R). Filtered out."
+                    verdict = "SKIP (LOW PAYOFF)"
+                    verdict_badge = "skip"
+                    buy_range_low = round(close_price * 0.985, 2)
+                    buy_range_high = round(close_price, 2)
+                    entry_ref = close_price
+                    risk_amount = round(default_risk, 2)
+                    sl_price = round(entry_ref - risk_amount, 2)
+                    target_price = round(entry_ref + (1.0 * risk_amount), 2)
+                    explanation = f"50MA setup triggered, but AI filters it out (predicted only {pred_r:.2f}R). Wait for a cleaner signal."
             else:
-                if pred_gain_pct > abs(pred_drop_pct):
-                    verdict = "BULLISH SETUP"
-                    verdict_class = "bullish"
-                    explanation = "Upward momentum expected (+{0}%). Awaiting entry pullback.".format(pred_gain_pct)
+                # Regular market conditions - rely on Global 7-day model + technical levels
+                if gain_pct >= (drop_pct * 1.25) and gain_pct >= 2.0:
+                    verdict = "BUY ON PULLBACK (BULLISH)"
+                    verdict_badge = "bullish"
+                    # Accumulate on dip near support
+                    buy_range_low = round(close_price * 0.985, 2)
+                    buy_range_high = round(close_price, 2)
+                    entry_ref = close_price
+                    risk_amount = round(default_risk, 2)
+                    sl_price = round(entry_ref - risk_amount, 2)
+                    target_price = round(entry_ref + max(pred_gain_pts, 2.0 * risk_amount), 2)
+                    explanation = f"Strong 7-day upward potential (+{gain_pct}%). Accumulate on minor pullbacks between Rs {buy_range_low} and Rs {buy_range_high}."
+                elif drop_pct >= (gain_pct * 1.3):
+                    verdict = "AVOID (HIGH DOWNSIDE)"
+                    verdict_badge = "avoid"
+                    buy_range_low = round(close_price * 0.95, 2)
+                    buy_range_high = round(close_price * 0.97, 2)
+                    entry_ref = close_price
+                    risk_amount = round(default_risk, 2)
+                    sl_price = round(entry_ref - risk_amount, 2)
+                    target_price = round(entry_ref + max(pred_gain_pts, risk_amount), 2)
+                    explanation = f"Downside risk outweighs upside (-{drop_pct}% vs +{gain_pct}%). Avoid fresh longs until support forms."
                 else:
-                    verdict = "NEUTRAL / CONSOLIDATION"
-                    verdict_class = "neutral"
-                    explanation = "Rangebound action expected. No high-edge setup currently."
+                    verdict = "NEUTRAL / RANGEBOUND"
+                    verdict_badge = "neutral"
+                    buy_range_low = round(close_price * 0.99, 2)
+                    buy_range_high = round(close_price * 1.005, 2)
+                    entry_ref = close_price
+                    risk_amount = round(default_risk, 2)
+                    sl_price = round(entry_ref - risk_amount, 2)
+                    target_price = round(entry_ref + max(pred_gain_pts, 1.5 * risk_amount), 2)
+                    explanation = f"Consolidating within a narrow band (+{gain_pct}% / -{drop_pct}%). Wait for clear breakout before entering."
+
+            # Calculate Exact P&L Figures
+            profit_per_share = round(max(1.0, target_price - entry_ref), 2)
+            profit_pct = round((profit_per_share / entry_ref) * 100, 2)
+
+            loss_per_share = round(max(1.0, entry_ref - sl_price), 2)
+            loss_pct = round((loss_per_share / entry_ref) * 100, 2)
+
+            rr_ratio = round(profit_per_share / loss_per_share, 2)
+            profit_100_shares = round(profit_per_share * 100, 2)
+            loss_100_shares = round(loss_per_share * 100, 2)
 
             date_val = str(last_row['Date'].iloc[0]) if 'Date' in last_row.columns else str(last_row['date'].iloc[0])
 
-            predictions[sym] = {
+            # Prepend/update prediction item
+            company_name = stock_meta.get(sym, {}).get('name', sym)
+            sector_name = stock_meta.get(sym, {}).get('sector', 'NSE Equity')
+
+            new_pred_item = {
+                "symbol": sym,
+                "company_name": company_name,
+                "sector": sector_name,
                 "date": date_val[:10],
                 "close": close_price,
                 "strategy_triggered": is_triggered,
                 "predicted_r": round(pred_r, 2),
-                "predicted_gain_pct": pred_gain_pct,
-                "predicted_drop_pct": pred_drop_pct,
+                "predicted_gain_pct": gain_pct,
+                "predicted_drop_pct": drop_pct,
                 "verdict": verdict,
-                "verdict_class": verdict_class,
-                "explanation": explanation
+                "verdict_badge": verdict_badge,
+                "explanation": explanation,
+                # Clear Price Action Levels
+                "buy_range_low": buy_range_low,
+                "buy_range_high": buy_range_high,
+                "entry_ref": entry_ref,
+                "target_price": target_price,
+                "sl_price": sl_price,
+                # Profit / Loss Breakdown
+                "profit_per_share": profit_per_share,
+                "profit_pct": profit_pct,
+                "profit_100_shares": profit_100_shares,
+                "loss_per_share": loss_per_share,
+                "loss_pct": loss_pct,
+                "loss_100_shares": loss_100_shares,
+                "rr_ratio": rr_ratio,
+                "updated_at": datetime.now().strftime("%I:%M %p, %d %b")
             }
-            print(f"[OK] Predicted {sym}: {close_price} INR | {verdict}")
+
+            # Put newest at the front
+            predictions = {sym: new_pred_item, **{k: v for k, v in predictions.items() if k != sym}}
+            print(f"[OK] Predicted {sym}: Rs {close_price} | {verdict} | Buy: Rs {buy_range_low}-Rs {buy_range_high} | Target: Rs {target_price} | SL: Rs {sl_price}")
 
         except Exception as e:
             print(f"Error predicting {sym}: {e}")
